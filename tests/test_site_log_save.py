@@ -102,3 +102,18 @@ class TestSaveRendersTheQrLabel:
         # A label drawn once and then dropped would take its own download with it.
         assert not at.exception
         assert any("aaaaaaaa" in s.value for s in at.success)
+
+
+class TestGpsCaptureModes:
+    def test_live_location_cookie_is_consumed_when_present(self, monkeypatch):
+        import components.site_log as site_log
+
+        class FakeContext:
+            cookies = {
+                "vs_geo_lat": "11.806500",
+                "vs_geo_lon": "13.153000",
+            }
+
+        monkeypatch.setattr(site_log.st, "context", FakeContext(), raising=False)
+
+        assert site_log._read_device_gps_cookie() == (11.8065, 13.153)

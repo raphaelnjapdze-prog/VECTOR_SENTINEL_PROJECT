@@ -17,6 +17,7 @@ from utils.auth import (
     get_current_user_id,
     is_current_user_admin,
 )
+from utils.logging_config import get_logger
 from utils.data_manager import (
     available_to_vial,
     clear_specimen_records_cache,
@@ -34,7 +35,11 @@ from utils.icons import render_page_header
 from utils.offline_queue import clear_quarantine, get_quarantine, pending_count
 from utils.pcr_and_accuracy import render_specimen_qr
 
+logger = get_logger(__name__)
+
 _SUBSAMPLE_GENERA = ["Anopheles", "Culex", "Aedes"]
+GPS_LAT_COOKIE = "vs_geo_lat"
+GPS_LON_COOKIE = "vs_geo_lon"
 
 _BREEDING_SITE_OPTIONS = [
     "Stagnant pool",
@@ -67,6 +72,75 @@ def _validate(anoph, culex, aedes, other, lat, lon, has_gps) -> str | None:
 
 def _plural(n: int) -> str:
     return f"{n} entr{'y' if n == 1 else 'ies'}"
+
+
+def _read_device_gps_cookie() -> tuple[float, float] | None:
+    """Read the last device-captured coordinates saved by the browser JS."""
+    try:
+        cookies = st.context.cookies or {}
+    except Exception:
+        logger.debug("st.context.cookies unavailable for device GPS", exc_info=True)
+        return None
+
+    lat_raw = cookies.get(GPS_LAT_COOKIE)
+    lon_raw = cookies.get(GPS_LON_COOKIE)
+    if lat_raw is None or lon_raw is None:
+        return None
+
+    try:
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+    except (TypeError, ValueError):
+        logger.debug("Device GPS cookies were not valid floats: %r / %r", lat_raw, lon_raw)
+        return None
+
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        logger.warning("Device GPS cookies were outside valid bounds: %s, %s", lat, lon)
+        return None
+
+    return lat, lon
+
+
+def _render_device_gps_capture_script() -> None:
+    """Ask the browser for the current location and save the result in cookies."""
+    st.iframe(
+        """
+        <script>
+          (function () {
+            function clearCookie(name) {
+              var proto = '';
+              try { proto = window.parent.location.protocol; } catch (e) {}
+              var secure = proto === 'https:' ? '; Secure' : '';
+              document.cookie = name + '=; Path=/; Max-Age=0; SameSite=Lax' + secure;
+            }
+            if (!navigator || !navigator.geolocation) {
+              clearCookie('vs_geo_lat');
+              clearCookie('vs_geo_lon');
+              return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+              function (position) {
+                var lat = position.coords.latitude;
+                var lon = position.coords.longitude;
+                var proto = '';
+                try { proto = window.parent.location.protocol; } catch (e) {}
+                var secure = proto === 'https:' ? '; Secure' : '';
+                document.cookie = 'vs_geo_lat=' + lat + '; Path=/; Max-Age=300; SameSite=Lax' + secure;
+                document.cookie = 'vs_geo_lon=' + lon + '; Path=/; Max-Age=300; SameSite=Lax' + secure;
+                try { window.parent.location.reload(); } catch (e) {}
+              },
+              function () {
+                clearCookie('vs_geo_lat');
+                clearCookie('vs_geo_lon');
+              },
+              { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+            );
+          })();
+        </script>
+        """,
+        height=1,
+    )
 
 
 def _render_rejected_entries():
@@ -159,17 +233,40 @@ def render_site_log_page():
     has_gps = st.checkbox("I have GPS coordinates for this site", key="site_log_has_gps")
     gps_lat, gps_lon = None, None
     if has_gps:
-        gcol1, gcol2 = st.columns(2)
-        with gcol1:
-            gps_lat = st.number_input(
-                "Latitude", value=11.8000, format="%.6f", min_value=-90.0, max_value=90.0,
-                key="site_log_lat",
+        gps_mode = st.radio(
+            "Coordinate source",
+            ["Manual entry", "Use current location"],
+            horizontal=True,
+            key="site_log_gps_mode",
+        )
+
+        if gps_mode == "Use current location":
+            device_coords = _read_device_gps_cookie()
+            location_btn = st.button(
+                "Fetch current location",
+                key="site_log_fetch_location",
+                use_container_width=True,
             )
-        with gcol2:
-            gps_lon = st.number_input(
-                "Longitude", value=13.1500, format="%.6f", min_value=-180.0, max_value=180.0,
-                key="site_log_lon",
-            )
+            if location_btn:
+                _render_device_gps_capture_script()
+                st.caption("Requesting device location…")
+            if device_coords:
+                gps_lat, gps_lon = device_coords
+                st.success(f"Location captured: {gps_lat:.6f}, {gps_lon:.6f}")
+            else:
+                st.info("Use the button above to capture the current device coordinates.")
+        else:
+            gcol1, gcol2 = st.columns(2)
+            with gcol1:
+                gps_lat = st.number_input(
+                    "Latitude", value=11.8000, format="%.6f", min_value=-90.0, max_value=90.0,
+                    key="site_log_lat",
+                )
+            with gcol2:
+                gps_lon = st.number_input(
+                    "Longitude", value=13.1500, format="%.6f", min_value=-180.0, max_value=180.0,
+                    key="site_log_lon",
+                )
 
     with st.form("site_log_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
